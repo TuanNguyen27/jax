@@ -1976,6 +1976,17 @@ def append(arr, values, axis=None):
     return concatenate([arr, values], axis=axis)
 
 
+@_wraps(onp.convolve)
+def convolve(a, b, mode='full'):
+  a_reshape = lax.reshape(a, (1,1,) + len(a)) 
+  #flip rhs
+  b_reshape = flip(lax.reshape(b, (1,1,) + len(b)), 2) 
+  if mode in ["valid", "same"]:
+    return lax.conv(a_reshape, b_reshape, (1,), mode)
+  else:
+    return lax.conv_general_dilated(a_reshape, b_reshape, [1], [(len(a)-1,len(a)-1)])
+
+
 ### Tensor contraction operations
 
 
