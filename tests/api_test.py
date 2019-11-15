@@ -156,11 +156,13 @@ class APITest(jtu.JaxTestCase):
     def f(x):
       return x
 
-    jtu.check_raises_regexp(lambda: grad(f)("foo"), TypeError,
-                     ".* 'foo' of type <.*'str'> is not a valid JAX type")
+    self.assertRaisesRegexp(
+      TypeError, ".* 'foo' of type <.*'str'> is not a valid JAX type",
+      lambda: grad(f)("foo"))
 
-    jtu.check_raises_regexp(lambda: jit(f)("foo"), TypeError,
-                     ".* 'foo' of type <.*'str'> is not a valid JAX type")
+    self.assertRaisesRegexp(
+      TypeError, ".* 'foo' of type <.*'str'> is not a valid JAX type",
+      lambda: jit(f)("foo"))
 
   # TODO(dougalm): enable when we remove 'None' from pytree nodes
   # def test_bad_output(self):
@@ -210,9 +212,9 @@ class APITest(jtu.JaxTestCase):
     def f(x, y):
       return np.dot(x, y)
 
-    jtu.check_raises_regexp(
-        lambda: grad(f)(onp.zeros(3), onp.zeros(4)), TypeError,
-        "Incompatible shapes for dot: got \\(3L?,\\) and \\(4L?,\\).")
+    self.assertRaisesRegexp(
+      TypeError, "Incompatible shapes for dot: got \\(3L?,\\) and \\(4L?,\\).",
+      lambda: grad(f)(onp.zeros(3), onp.zeros(4)))
 
   def test_switch_value_jit(self):
     def f(x):
@@ -233,18 +235,19 @@ class APITest(jtu.JaxTestCase):
       return x
 
     assert jit(f, static_argnums=(1,))(0, 5) == 10
-    jtu.check_raises_regexp(
-        lambda: jit(f)(0, 5), TypeError,
+    self.assertRaisesRegexp(
+        TypeError,
         "('JaxprTracer' object cannot be interpreted as an integer"
-        "|Abstract value passed to .*)")
+        "|Abstract value passed to .*)",
+        lambda: jit(f)(0, 5))
 
   def test_casts(self):
     for castfun in [float, complex, hex, oct] + list(six.integer_types):
       f = lambda x: castfun(x)
-      jtu.check_raises_regexp(
-          lambda: jit(f)(0), TypeError,
+      self.assertRaisesRegexp(
+          TypeError,
           "('JaxprTracer' object cannot be interpreted as an integer"
-          "|Abstract value passed to .*)")
+          "|Abstract value passed to .*)", lambda: jit(f)(0))
 
   def test_unimplemented_interpreter_rules(self):
     foo_p = Primitive('foo')
@@ -467,6 +470,28 @@ class APITest(jtu.JaxTestCase):
     g, aux = grad(lambda x: (x**3, [x**2, 4.]), has_aux=True)(4.)
     self.assertEqual(g, grad(lambda x: x**3)(4.))
     self.assertEqual(aux, [4.**2, 4.])
+
+  def test_jvp_mismatched_arguments(self):
+    self.assertRaisesRegex(
+      TypeError,
+      ("primal and tangent arguments to jax.jvp must have the same tree "
+       "structure"),
+      lambda: api.jvp(lambda x, y: x * y, (onp.float32(2),), ()))
+    self.assertRaisesRegex(
+      TypeError,
+      "primal and tangent arguments to jax.jvp must have equal types",
+      lambda: api.jvp(lambda x: -x, (onp.float16(2),), (onp.float32(4),)))
+
+  def test_vjp_mismatched_arguments(self):
+    _, pullback = api.vjp(lambda x, y: x * y, onp.float32(3), onp.float32(4))
+    self.assertRaisesRegex(
+      TypeError,
+      "Tree structure of cotangent input.*does not match",
+      lambda: pullback((onp.float32(7), onp.float32(100))))
+    self.assertRaisesRegex(
+      TypeError,
+      "Type of cotangent input to vjp pullback.*does not match type",
+      lambda: pullback((onp.float16(42))))
 
   def test_jarrett_jvps(self):
     def f1(x):
@@ -749,8 +774,8 @@ class APITest(jtu.JaxTestCase):
   def test_devicearray_delete(self):
     x = device_put(1.)
     x.delete()
-    jtu.check_raises_regexp(lambda: repr(x), ValueError,
-                            "DeviceValue has been deleted.")
+    self.assertRaisesRegexp(ValueError, "DeviceValue has been deleted.",
+                            lambda: repr(x))
 
   def test_devicearray_block_until_ready(self):
     x = device_put(1.)
@@ -901,10 +926,10 @@ class APITest(jtu.JaxTestCase):
 
   def test_grad_of_int_errors(self):
     dfn = grad(lambda x: x ** 2)
-    jtu.check_raises_regexp(
-      lambda: dfn(3), TypeError,
+    self.assertRaisesRegexp(
+      TypeError,
       "Primal inputs to reverse-mode differentiation must be of float or "
-      "complex type, got type int..")
+      "complex type, got type int..", lambda: dfn(3))
 
   def test_xla_computation(self):
     # these tests basically check the examples in the xla_computation docstring
@@ -960,8 +985,8 @@ class APITest(jtu.JaxTestCase):
     self.assertEqual(x.device_buffer.device(), device)
 
   def test_jit_of_noncallable(self):
-    jtu.check_raises_regexp(lambda: api.jit(3), TypeError,
-                            "Expected a callable value.*")
+    self.assertRaisesRegexp(TypeError, "Expected a callable value.*",
+                            lambda: api.jit(3))
 
   def test_issue_1062(self):
     # code from https://github.com/google/jax/issues/1062 @shoyer
@@ -1096,12 +1121,12 @@ class APITest(jtu.JaxTestCase):
 
   def test_vmap_in_axes_tree_prefix_error(self):
     # https://github.com/google/jax/issues/795
-    jtu.check_raises_regexp(
-        lambda: api.vmap(lambda x: x, in_axes=(0, 0))(np.ones(3)),
+    self.assertRaisesRegexp(
         ValueError,
         "axes specification must be a tree prefix of the corresponding "
         r"value, got specification \(0, 0\) for value "
-        r"PyTreeDef\(tuple, \[\*\]\)."
+        r"PyTreeDef\(tuple, \[\*\]\).",
+        lambda: api.vmap(lambda x: x, in_axes=(0, 0))(np.ones(3))
     )
 
   def test_vmap_unbatched_object_passthrough_issue_183(self):
@@ -1224,6 +1249,9 @@ class APITest(jtu.JaxTestCase):
     python_should_be_executing = False
     api.pmap(f, 'i')(x)
 
+  def test_repr(self):
+    rep = repr(np.ones(()) + 1.)
+    self.assertStartsWith(rep, 'DeviceArray')
 
 if __name__ == '__main__':
   absltest.main()

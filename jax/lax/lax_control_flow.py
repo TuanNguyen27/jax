@@ -121,6 +121,13 @@ def fori_loop(lower, upper, body_fun, init_val):
   Returns:
     Loop value from the final iteration, of type ``a``.
   """
+  # TODO: perhaps do more type checking here, for better error messages.
+  lower_dtype = xb.canonicalize_dtype(lax.dtype(lower))
+  upper_dtype = xb.canonicalize_dtype(lax.dtype(upper))
+  if lower_dtype != upper_dtype:
+    msg = ("lower and upper arguments to fori_loop must have equal types, "
+           "got {} and {}")
+    raise TypeError(msg.format(lower_dtype.name, upper_dtype.name))
   _, _, result = while_loop(_fori_cond_fun, _fori_body_fun(body_fun),
                             (lower, upper, init_val))
   return result
@@ -172,9 +179,13 @@ def while_loop(cond_fun, body_fun, init_val):
   if cond_jaxpr.out_avals != [ShapedArray((), onp.bool_)]:
     msg = "cond_fun must return a boolean scalar, but got output type(s) {}."
     raise TypeError(msg.format(cond_jaxpr.out_avals))
-  if not treedef_children(in_tree) == [body_tree]:
-    msg = "body_fun output pytree structure must match init_val, got {} and {}."
-    raise TypeError(msg.format(body_tree, treedef_children(in_tree)[0]))
+
+  in_tree_children = in_tree.children()
+  assert len(in_tree_children) == 1
+  _check_tree_and_avals("body_fun output and input",
+                        # Extract the subtree and avals for the first element of the return tuple
+                        body_tree, body_jaxpr.out_avals,
+                        in_tree_children[0], init_avals)
   outs = while_p.bind(*itertools.chain(cond_consts, body_consts, init_vals),
                       cond_nconsts=len(cond_consts), cond_jaxpr=cond_jaxpr,
                       body_nconsts=len(body_consts), body_jaxpr=body_jaxpr)
@@ -205,7 +216,7 @@ def _while_loop_translation_rule(c, axis_env, *args, **kwargs):
   pred, = xla.jaxpr_subcomp(cond_c, cond_jaxpr.jaxpr, backend, axis_env,
                             _map(cond_c.Constant, cond_jaxpr.literals), (), *(x + z))
   if batched:
-    scalar = xla_client.Shape.array_shape(onp.dtype(onp.bool_), ())
+    scalar = ShapedArray((), onp.bool_)
     or_ = xla.primitive_computation(lax.or_p, scalar, scalar)
     pred = cond_c.Reduce(pred, cond_c.Constant(onp.array(False)), or_,
                          list(range(cond_jaxpr.out_avals[0].ndim)))
@@ -303,34 +314,34 @@ def cond(pred, true_operand, true_fun, false_operand, false_fun):
   """
 
   if len(onp.shape(pred)) != 0:
-    raise TypeError("Pred must be a scalar, got {} of shape {}".format(pred, onp.shape(pred)))
+    raise TypeError("Pred must be a scalar, got {} of shape {}.".format(pred, onp.shape(pred)))
 
-  pred_dtype = onp.result_type(pred)
+  try:
+    pred_dtype = onp.result_type(pred)
+  except TypeError:
+    msg = ("Pred type must be either boolean or number, got {}.")
+    raise TypeError(msg.format(pred))
+
   if pred_dtype.kind != 'b':
     if pred_dtype.kind in 'iuf':
       pred = pred != 0
     else:
-      msg = ("Pred type must be either boolean or number, got {}")
+      msg = ("Pred type must be either boolean or number, got {}.")
       raise TypeError(msg.format(pred_dtype))
   true_ops, true_tree = tree_flatten((true_operand,))
   true_avals = tuple(_map(_abstractify, true_ops))
-  true_jaxpr, true_consts, out_tree = _initial_style_jaxpr(true_fun, true_tree, true_avals)
+  true_jaxpr, true_consts, true_out_tree = _initial_style_jaxpr(true_fun, true_tree, true_avals)
   false_ops, false_tree = tree_flatten((false_operand,))
   false_avals = tuple(_map(_abstractify, false_ops))
-  false_jaxpr, false_consts, out_tree2 = _initial_style_jaxpr(false_fun, false_tree, false_avals)
-  if out_tree != out_tree2:
-    msg = ("true_fun and false_fun outputs must have identical tree structure, "
-           "got {} and {}.")
-    raise TypeError(msg.format(out_tree, out_tree2))
-  if not all(_map(typematch, true_jaxpr.out_avals, false_jaxpr.out_avals)):
-    msg = ("true_fun and false_fun outputs must have identical types, "
-           "got {} and {}.")
-    raise TypeError(msg.format(true_jaxpr.out_avals, false_jaxpr.out_avals))
+  false_jaxpr, false_consts, false_out_tree = _initial_style_jaxpr(false_fun, false_tree, false_avals)
+  _check_tree_and_avals("true_fun and false_fun output",
+                        true_out_tree, true_jaxpr.out_avals,
+                        false_out_tree, false_jaxpr.out_avals)
   out = cond_p.bind(
       *itertools.chain([pred], true_consts, true_ops, false_consts, false_ops),
       true_jaxpr=true_jaxpr, false_jaxpr=false_jaxpr,
       true_nconsts=len(true_consts), false_nconsts=len(false_consts))
-  return tree_unflatten(out_tree, out)
+  return tree_unflatten(true_out_tree, out)
 
 def _cond_abstract_eval(*args, **kwargs):
   return kwargs["true_jaxpr"].out_avals
@@ -617,33 +628,80 @@ def _scan_partial_eval(trace, *tracers, **kwargs):
       carry_uk = _map(operator.or_, carry_uk, carry_uk_out)
   else:
     assert False, "Fixpoint not reached"
+  num_res = len(jaxpr_1.out_avals) - len(jaxpr_2.out_avals)
 
-  in_consts = [core.unit if uk else t.pval[1] for uk, t in zip(unknowns, tracers)]
+  # The residuals are treated as extensive outputs of jaxpr_1 (and extensive
+  # inputs to jaxpr_2), but residuals that are loop-invariant can be hoisted.
+  # TODO(mattjj): hoist other loop-invariant values here too (instantiate=False)
+  invariant_pvals = [pe.PartialVal((None, core.unit if uk else t.pval[1]))
+                     for uk, t in zip(unknowns[:num_consts], tracers[:num_consts])]
+  other_pvals = [pe.PartialVal((a, core.unit)) for a in jaxpr_1.in_avals[num_consts:]]
+  in_pvals_1 = invariant_pvals + other_pvals
+  untyped_jaxpr_1, out_pvals_1, consts_1 = pe.trace_to_jaxpr(
+      lu.wrap_init(core.jaxpr_as_fun(jaxpr_1)), in_pvals_1,
+      instantiate=[True] * (num_carry + num_ys) + [False] * num_res)
+  const_avals_1 = [raise_to_shaped(core.get_aval(c)) for c in consts_1]
+  in_avals_1 = [core.abstract_unit] * num_consts + jaxpr_1.in_avals[num_consts:]
+  out_avals_1 = [core.abstract_unit if pv is None else pv for pv, c in out_pvals_1]
+  jaxpr_1_opt = pe.TypedJaxpr(pe.closure_convert_jaxpr(untyped_jaxpr_1),
+                              (), const_avals_1 + in_avals_1, out_avals_1)
+  num_consts_1 = num_consts + len(consts_1)
+  # any now-known residuals are intensive, so we want to revise jaxpr_2 to take
+  # those inputs as constants rather than as extensive inputs
+  _, _, res_pvals = split_list(out_pvals_1, [num_carry, num_ys])
+  intensive_residuals = [const for pv, const in res_pvals if pv is None]
+  move = [False] * len(jaxpr_1.in_avals) + [pv is None for pv, _ in res_pvals]
+  jaxpr_2_opt = _move_binders_to_front(jaxpr_2, move)
+  num_consts_2 = num_consts + len(intensive_residuals)
+
+  in_consts = (list(consts_1) + [core.unit] * num_consts +
+               [core.unit if uk else t.pval[1]
+                for uk, t in zip(unknowns[num_consts:], tracers[num_consts:])])
+  linear_1 = ([False] * len(consts_1) + [True] * num_consts +
+              [lin or uk for uk, lin in zip(unknowns[num_consts:], linear[num_consts:])])
+  out_flat = scan_p.bind(
+      *in_consts, forward=forward, length=length, jaxpr=jaxpr_1_opt,
+      num_consts=num_consts_1, num_carry=num_carry, linear=linear_1)
+  out_carry, ys, res_and_units = split_list(out_flat, [num_carry, num_ys])
+  extensive_residuals = [r for r, (pv, _) in zip(res_and_units, res_pvals) if pv is not None]
+
   new_tracers = [trace.instantiate_const(t) if uk else trace.new_instantiated_literal(core.unit)
                  for uk, t in zip(unknowns, tracers)]
-
   carry_avals, y_avals = split_list(jaxpr.out_avals, [num_carry])
   ys_avals = _map(partial(_promote_aval_rank, length), y_avals)
   out_avals = carry_avals + ys_avals
   out_pvs = [aval if uk else None for aval, uk in zip(out_avals, out_uk)]
 
-  linear_1 = [lin or uk for uk, lin in zip(unknowns, linear)]
-  out_flat = scan_p.bind(
-      *in_consts, forward=forward, length=length, jaxpr=jaxpr_1,
-      num_consts=num_consts, num_carry=num_carry, linear=linear_1)
-  out_carry, ys, residuals = split_list(out_flat, [num_carry, num_ys])
   out_consts = out_carry + ys
-  residual_tracers = _map(trace.new_instantiated_const, residuals)
+  int_res_tracers = _map(trace.new_instantiated_const, intensive_residuals)
+  ext_res_tracers = _map(trace.new_instantiated_const, extensive_residuals)
   out_tracers = [pe.JaxprTracer(trace, pe.PartialVal((pv, const)), None)
                  for pv, const in zip(out_pvs, out_consts)]
-  linear_2 = ([lin or not uk for uk, lin in zip(unknowns, linear)]
-              + [False] * len(residual_tracers))
-  eqn = pe.new_jaxpr_eqn(new_tracers + residual_tracers, out_tracers, scan_p,
-                         (), dict(forward=forward, length=length, jaxpr=jaxpr_2,
-                                  num_consts=num_consts, num_carry=num_carry,
-                                  linear=linear_2))
+  linear_2 = ([False] * len(int_res_tracers) +
+              [lin or not uk for uk, lin in zip(unknowns, linear)] +
+              [False] * len(ext_res_tracers))
+  eqn = pe.new_jaxpr_eqn(int_res_tracers + new_tracers + ext_res_tracers,
+                         out_tracers, scan_p, (),
+                         dict(forward=forward, length=length, jaxpr=jaxpr_2_opt,
+                              num_consts=num_consts_2,
+                              num_carry=num_carry, linear=linear_2))
   for t in out_tracers: t.recipe = eqn
   return out_tracers
+
+def _move_binders_to_front(typed_jaxpr, to_move):
+  assert not typed_jaxpr.jaxpr.constvars and not typed_jaxpr.jaxpr.freevars
+  assert len(typed_jaxpr.in_avals) == len(to_move)
+  new_invars = _move_to_front(typed_jaxpr.jaxpr.invars, to_move)
+  new_jaxpr = core.Jaxpr((), (), new_invars, typed_jaxpr.jaxpr.outvars,
+                         typed_jaxpr.jaxpr.eqns)
+  new_in_avals = _move_to_front(typed_jaxpr.in_avals, to_move)
+  new_typed_jaxpr = core.TypedJaxpr(new_jaxpr, typed_jaxpr.literals,
+                                    new_in_avals, typed_jaxpr.out_avals)
+  return new_typed_jaxpr
+
+def _move_to_front(lst, to_move):
+  return ([elt for elt, move in zip(lst, to_move) if move] +
+          [elt for elt, move in zip(lst, to_move) if not move])
 
 def _promote_aval_rank(sz, aval):
   if aval is core.abstract_unit:
@@ -655,54 +713,66 @@ def _scan_transpose(cts, *args, **kwargs):
   forward, length, num_consts, num_carry, jaxpr, linear = split_dict(
       kwargs, ["forward", "length", "num_consts", "num_carry", "jaxpr", "linear"])
 
-  # we can only transpose scans for which the nonlinear values appear in xs
+  # we've only implemented transposing scans with specific lin/nonlin patterns
   consts_lin, init_lin, xs_lin = split_list(linear, [num_consts, num_carry])
-  num_lin = sum(xs_lin)
-  if not all(consts_lin) or not all(init_lin) or not all(xs_lin[:num_lin]):
+  num_ires = len(consts_lin) - sum(consts_lin)
+  num_eres = len(xs_lin) - sum(xs_lin)
+  if consts_lin != [False] * num_ires + [True] * (len(consts_lin) - num_ires):
+    raise NotImplementedError
+  if xs_lin != [True] * (len(xs_lin) - num_eres) + [False] * num_eres:
+    raise NotImplementedError
+  if not all(init_lin):
     raise NotImplementedError
 
-  consts, init, xs, res = split_list(args, [num_consts, num_carry, num_lin])
-  assert not any(r is ad.undefined_primal for r in res)
+  consts, init, xs = split_list(args, [num_consts, num_carry])
+  ires, consts = split_list(consts, [num_ires])
+  xs, eres = split_list(xs, [sum(xs_lin)])
+  assert not any(r is ad.undefined_primal for r in ires)
+  assert not any(r is ad.undefined_primal for r in eres)
 
   carry_avals, y_avals = split_list(jaxpr.out_avals, [num_carry])
   ys_avals = _map(partial(_promote_aval_rank, length), y_avals)
   ct_carry, ct_ys = split_list(cts, [num_carry])
   ct_carry = _map(ad.instantiate_zeros_aval, carry_avals, ct_carry)
   ct_ys = _map(ad.instantiate_zeros_aval, ys_avals, ct_ys)
-  ct_consts = _map(ad_util.zeros_like_aval, jaxpr.in_avals[:num_consts])
+  ct_consts = _map(ad_util.zeros_like_aval, jaxpr.in_avals[num_ires:num_consts])
 
-  #       jaxpr :: [T d] -> [T c] -> [T a, res] -> ([T c], [T b])
-  # jaxpr_trans :: [] -> [CT d, CT c] -> [CT b, res] -> ([CT d, CT c], [CT a])
-  jaxpr_trans = _transpose_jaxpr(num_consts, len(res), jaxpr)
-  linear_trans = ([True] * (len(ct_consts) + len(ct_carry) + len(ct_ys))
-                  + [False] * len(res))
+  #       jaxpr :: [ires, T d] -> [T c] -> [T a, eres] -> ([T c], [T b])
+  # jaxpr_trans :: [ires] -> [CT d, CT c] -> [CT b, eres] -> ([CT d, CT c], [CT a])
+  jaxpr_trans = _transpose_jaxpr(num_ires, num_consts - num_ires, num_eres, jaxpr)
+  linear_trans = ([False] * num_ires +
+                  [True] * (len(ct_consts) + len(ct_carry) + len(ct_ys)) +
+                  [False] * num_eres)
 
   outs = scan_p.bind(
-      *(ct_consts + ct_carry + ct_ys + res), forward=not forward, length=length,
-      jaxpr=jaxpr_trans, num_consts=0, num_carry=num_consts+num_carry,
-      linear=linear_trans)
-  ct_consts, ct_init, ct_xs = split_list(outs, [num_consts, num_carry])
-  return ct_consts + ct_init + ct_xs + [None] * len(res)
+      *(ires + ct_consts + ct_carry + ct_ys + eres), forward=not forward,
+      length=length, jaxpr=jaxpr_trans, num_consts=num_ires,
+      num_carry=num_consts-num_ires+num_carry, linear=linear_trans)
+  ct_consts, ct_init, ct_xs = split_list(outs, [num_consts - num_ires, num_carry])
+  return [None] * num_ires + ct_consts + ct_init + ct_xs + [None] * num_eres
 
-# transpose_jaxpr :: ([c, a, res] -> b) -> ([CT c, CT b, res] -> [CT c, CT a]
-def _transpose_jaxpr(num_c, num_res, jaxpr):
-  num_a = len(jaxpr.in_avals) - num_c - num_res
-  c_avals, a_avals, res_avals = split_list(jaxpr.in_avals, [num_c, num_a])
+# transpose_jaxpr :: ([res1, c, a, res2] -> b)
+#                    -> ([res1, CT c, CT b, res2] -> [CT c, CT a])
+def _transpose_jaxpr(num_res1, num_c, num_res2, jaxpr):
+  num_a = len(jaxpr.in_avals) - num_res1 - num_c - num_res2
+  res1_avals, c_avals, a_avals, res2_avals = split_list(
+      jaxpr.in_avals, [num_res1, num_c, num_a])
   num_b = len(jaxpr.out_avals)
   b_avals = list(jaxpr.out_avals)
 
   @lu.wrap_init
-  def transposed(*cbar_bbar_res):
-    c_bar, b_bar, res = split_list(cbar_bbar_res, [num_c, num_b])
-    primals = [ad.undefined_primal] * (num_c + num_a) + res
+  def transposed(*res1_cbar_bbar_res2):
+    res1, c_bar, b_bar, res2 = split_list(
+        res1_cbar_bbar_res2, [num_res1, num_c, num_b])
+    primals = res1 + [ad.undefined_primal] * (num_c + num_a) + res2
     _, cbar_abar = ad.backward_pass(jaxpr.jaxpr, jaxpr.literals, (), primals,
                                     b_bar)
-    new_c_bar, a_bar, _ = split_list(cbar_abar, [num_c, num_a])
+    _, new_c_bar, a_bar, _ = split_list(cbar_abar, [num_res1, num_c, num_a])
     a_bar = _map(ad.instantiate_zeros_aval, a_avals, a_bar)
     c_bar = _map(ad.instantiate_zeros_aval, c_avals,
                 _map(ad.add_tangents, c_bar, new_c_bar))
     return c_bar + a_bar
-  return _make_typed_jaxpr(transposed, c_avals + b_avals + res_avals)
+  return _make_typed_jaxpr(transposed, res1_avals + c_avals + b_avals + res2_avals)
 
 def _make_typed_jaxpr(traceable, in_avals):
   pvals = [pe.PartialVal((aval, core.unit)) for aval in in_avals]

@@ -2742,6 +2742,14 @@ def _dynamic_slice_shape_rule(operand, *start_indices, **kwargs):
     raise TypeError(msg.format(slice_sizes))
   return tuple(slice_sizes)
 
+def _dynamic_slice_dtype_rule(operand, *start_indices, **kw):
+  if any(i.dtype != start_indices[0].dtype or
+         not onp.issubdtype(i.dtype, onp.integer) for i in start_indices):
+    msg = ("index arguments to dynamic_slice must be integers of the same "
+           "type, got: {}")
+    raise TypeError(msg.format(", ".join(i.dtype.name for i in start_indices)))
+  return operand.dtype
+
 def _dynamic_slice_translation_rule(c, operand, *start_indices, **kwargs):
   slice_sizes = kwargs["slice_sizes"]
   return c.DynamicSlice(operand, start_indices, slice_sizes)
@@ -2788,7 +2796,7 @@ def _dynamic_slice_batching_rule(batched_args, batch_dims, slice_sizes,
 
 
 dynamic_slice_p = standard_primitive(
-    _dynamic_slice_shape_rule, _input_dtype, 'dynamic_slice',
+    _dynamic_slice_shape_rule, _dynamic_slice_dtype_rule, 'dynamic_slice',
     _dynamic_slice_translation_rule)
 ad.primitive_jvps[dynamic_slice_p] = _dynamic_slice_jvp
 ad.primitive_transposes[dynamic_slice_p] = _dynamic_slice_transpose_rule
@@ -2812,6 +2820,11 @@ def _dynamic_update_slice_shape_rule(operand, update, *start_indices, **kwargs):
 
 def _dynamic_update_slice_dtype_rule(operand, update, *start_indices, **kwargs):
   _check_same_dtypes("dynamic_update_slice", False, operand.dtype, update.dtype)
+  if any(i.dtype != start_indices[0].dtype or
+         not onp.issubdtype(i.dtype, onp.integer) for i in start_indices):
+    msg = ("index arguments to dynamic_update_slice must be integers of the "
+           "same type, got {}")
+    raise TypeError(msg.format(", ".join(i.dtype.name for i in start_indices)))
   return operand.dtype
 
 def _dynamic_update_slice_jvp(primals, tangents, update_shape):
@@ -3345,7 +3358,7 @@ def _reduce_sum_shape_rule(operand, axes, input_shape):
 
 def _reduce_sum_translation_rule(c, operand, axes, input_shape):
   dtype = c.GetShape(operand).numpy_dtype()
-  scalar = xla_client.Shape.array_shape(dtype, ())
+  scalar = ShapedArray((), dtype)
   return c.Reduce(operand, c.Constant(onp.array(0, dtype)),
                   xla.primitive_computation(add_p, scalar, scalar),
                   axes)
@@ -3369,7 +3382,7 @@ def _reduce_prod_shape_rule(operand, axes):
 
 def _reduce_prod_translation_rule(c, operand, axes):
   dtype = c.GetShape(operand).numpy_dtype()
-  scalar = xla_client.Shape.array_shape(dtype, ())
+  scalar = ShapedArray((), dtype)
   return c.Reduce(operand, c.Constant(onp.array(1, dtype)),
                   xla.primitive_computation(mul_p, scalar, scalar),
                   axes)
@@ -3415,7 +3428,7 @@ def _reduce_chooser_shape_rule(operand, axes):
 
 def _reduce_chooser_translation_rule(prim, identity, c, operand, axes):
   dtype = c.GetShape(operand).numpy_dtype()
-  scalar = xla_client.Shape.array_shape(dtype, ())
+  scalar = ShapedArray((), dtype)
   return c.Reduce(operand, c.Constant(identity(dtype)),
                   xla.primitive_computation(prim, scalar, scalar), axes)
 
@@ -3452,7 +3465,7 @@ def _reduce_logical_shape_rule(operand, axes):
   return tuple(onp.delete(operand.shape, axes))
 
 def _reduce_logical_translation_rule(prim, identity, c, operand, axes):
-  scalar = xla_client.Shape.array_shape(onp.dtype(onp.bool_), ())
+  scalar = ShapedArray((), onp.bool_)
   return c.Reduce(operand, c.Constant(identity(onp.bool_)),
                   xla.primitive_computation(prim, scalar, scalar), axes)
 
@@ -3515,7 +3528,7 @@ def _reduce_window_sum_shape_rule(operand, window_dimensions, window_strides,
 def _reduce_window_sum_translation_rule(c, operand, window_dimensions,
                                         window_strides, padding, input_shape):
   dtype = c.GetShape(operand).numpy_dtype()
-  scalar = xla_client.Shape.array_shape(dtype, ())
+  scalar = ShapedArray((), dtype)
   return c.ReduceWindow(operand, c.Constant(onp.array(0, dtype)),
                         xla.primitive_computation(add_p, scalar, scalar),
                         window_dimensions, window_strides, padding)
@@ -3562,7 +3575,7 @@ batching.primitive_batchers[reduce_window_sum_p] = partial(
 def _reduce_window_chooser_translation_rule(
     prim, identity, c, operand, window_dimensions, window_strides, padding):
   dtype = c.GetShape(operand).numpy_dtype()
-  scalar = xla_client.Shape.array_shape(dtype, ())
+  scalar = ShapedArray((), dtype)
   return c.ReduceWindow(operand, c.Constant(identity(dtype)),
                         xla.primitive_computation(prim, scalar, scalar),
                         window_dimensions, window_strides, padding)
@@ -3653,7 +3666,7 @@ def _select_and_scatter_add_translation(
     c, source, operand, select_prim, window_dimensions, window_strides,
     padding):
   dtype = c.GetShape(operand).numpy_dtype()
-  scalar = xla_client.Shape.array_shape(dtype, ())
+  scalar = ShapedArray((), dtype)
   select = xla.primitive_computation(select_prim, scalar, scalar)
   scatter = xla.primitive_computation(add_p, scalar, scalar)
   zero = c.Constant(onp.array(0, dtype))

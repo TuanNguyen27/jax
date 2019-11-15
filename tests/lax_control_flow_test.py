@@ -191,6 +191,21 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     self.assertEqual(cloop(3, limit, 1), limit - 3)
     assert not effect[0]
 
+  def testWhileTypeErrors(self):
+    """Test typing error messages for while."""
+    with self.assertRaisesRegex(TypeError,
+        re.escape("cond_fun must return a boolean scalar, but got pytree PyTreeDef(tuple, [*,*]).")):
+      lax.while_loop(lambda c: (1., 1.), lambda c: c, 0.)
+    with  self.assertRaisesRegex(TypeError,
+        re.escape("cond_fun must return a boolean scalar, but got output type(s) [ShapedArray(float32[])].")):
+      lax.while_loop(lambda c: np.float32(1.), lambda c: c, np.float32(0.))
+    with self.assertRaisesRegex(TypeError,
+        re.escape("body_fun output and input must have same type structure, got PyTreeDef(tuple, [*,*]) and *.")):
+      lax.while_loop(lambda c: True, lambda c: (1., 1.), 0.)
+    with self.assertRaisesRegex(TypeError,
+        re.escape("body_fun output and input must have identical types, got ShapedArray(bool[]) and ShapedArray(float32[]).")):
+      lax.while_loop(lambda c: True, lambda c: True, np.float32(0.))
+
   def testNestedWhileWithDynamicUpdateSlice(self):
     num = 5
 
@@ -305,6 +320,12 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     ans = api.vmap(fun)(onp.array([0, 0]), onp.array([1, 2]))
     expected = (onp.array([4, 3]), onp.array([1, 2]))
     self.assertAllClose(ans, expected, check_dtypes=False)
+
+  def testForiLoopErrors(self):
+    """Test typing error messages for while."""
+    with self.assertRaisesRegex(
+      TypeError, "arguments to fori_loop must have equal types"):
+      lax.fori_loop(np.int16(0), np.int32(10), (lambda i, c: c), np.float32(7))
 
   def testForiLoopBatched(self):
     def body_fun(i, loop_carry):
@@ -446,11 +467,11 @@ class LaxControlFlowTest(jtu.JaxTestCase):
 
     def fun(pred):
       return lax.cond(pred, pred, lambda x: (True, x), pred, lambda x: (False, x))
-    
+
     @api.jit
     def cfun(pred):
       return fun(pred)
-    
+
     self.assertEqual(fun(0), cfun(0), (False,0))
     self.assertEqual(fun(0.), cfun(0.), (False,0.))
     self.assertEqual(fun(1), cfun(1), (True,1))
@@ -460,7 +481,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     for pred in ["abc", [], [1,2]]:
       for f in [fun, cfun]:
         self.assertRaises(TypeError, f, pred)
-    
+
   def testNestedCond(self):
     def fun(x):
       if x < 2:
@@ -486,6 +507,31 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     self.assertEqual(cfun(1), fun(1))
     self.assertEqual(cfun(3), fun(3))
     self.assertEqual(cfun(6), fun(6))
+
+  def testCondTypeErrors(self):
+    """Test typing error messages for  cond."""
+    with self.assertRaisesRegex(TypeError,
+        re.escape("Pred type must be either boolean or number, got <function")):
+      lax.cond(lambda x: True,
+               1., lambda top: 1., 2., lambda fop: 2.)
+    with self.assertRaisesRegex(TypeError,
+        re.escape("Pred type must be either boolean or number, got foo.")):
+      lax.cond("foo",
+               1., lambda top: 1., 2., lambda fop: 2.)
+    with self.assertRaisesRegex(TypeError,
+        re.escape("Pred must be a scalar, got (1.0, 1.0) of shape (2,).")):
+      lax.cond((1., 1.),
+               1., lambda top: 1., 2., lambda fop: 2.)
+    with self.assertRaisesRegex(TypeError,
+        re.escape("true_fun and false_fun output must have same type structure, got * and PyTreeDef(tuple, [*,*]).")):
+      lax.cond(True,
+               1., lambda top: 1., 2., lambda fop: (2., 2.))
+    with self.assertRaisesRegex(TypeError,
+        re.escape("true_fun and false_fun output must have identical types, got ShapedArray(float32[1]) and ShapedArray(float32[]).")):
+      lax.cond(True,
+               1., lambda top: np.array([1.], np.float32),
+               2., lambda fop: np.float32(1.))
+
 
   def testCondOneBranchConstant(self):
     def fun(x):
@@ -843,14 +889,13 @@ class LaxControlFlowTest(jtu.JaxTestCase):
         'scan got value with no leading axis to scan over.*',
         lambda: lax.scan(plus_one, p0, list(range(5))))
 
-  @jtu.skip_on_flag('jax_enable_x64', True)  # With float64 error messages are different; hard to check precisely
   def testScanTypeErrors(self):
     """Test typing error messages for scan."""
     a = np.arange(5)
     # Body output not a tuple
     with self.assertRaisesRegex(TypeError,
-        re.escape("scan body output must be a pair, got ShapedArray(int32[]).")):
-      lax.scan(lambda c, x: 0, 0, a)
+        re.escape("scan body output must be a pair, got ShapedArray(float32[]).")):
+      lax.scan(lambda c, x: np.float32(0.), 0, a)
     with  self.assertRaisesRegex(TypeError,
         re.escape("scan carry output and input must have same type structure, "
                   "got PyTreeDef(tuple, [*,*,*]) and PyTreeDef(tuple, [*,PyTreeDef(tuple, [*,*])])")):
@@ -861,7 +906,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     with self.assertRaisesRegex(TypeError,
         re.escape("scan carry output and input must have identical types, "
                   "got ShapedArray(int32[]) and ShapedArray(float32[]).")):
-      lax.scan(lambda c, x: (0, x), 1.0, a)
+      lax.scan(lambda c, x: (np.int32(0), x), np.float32(1.0), a)
     with self.assertRaisesRegex(TypeError,
         re.escape("scan carry output and input must have same type structure, got * and PyTreeDef(tuple, [*,*]).")):
       lax.scan(lambda c, x: (0, x), (1, 2), np.arange(5))
@@ -1364,6 +1409,20 @@ class LaxControlFlowTest(jtu.JaxTestCase):
           lambda x: a * np.ones(2), 1.0, solve, solve)
     with self.assertRaisesRegex(ValueError, re.escape("matvec() output shapes")):
       api.jvp(bad_matvec_usage, (1.0,), (1.0,))
+
+  def testIssue810(self):
+    def loss(A):
+      def step(x, i):
+        return np.matmul(A, x), None
+      init_x = np.zeros(A.shape[-1:])
+      last_x, _ = lax.scan(step, init_x, np.arange(10))
+      return np.sum(last_x)
+
+    A = np.zeros((3, 3))
+    # The second DUS was unnecessarily replicating A across time.
+    # We check XLA because _scan_impl is "underneath" the jaxpr language.
+    s = str(api.xla_computation(api.grad(loss))(A).GetHloText())
+    assert s.count("dynamic-update-slice(") < 2
 
 
 if __name__ == '__main__':
