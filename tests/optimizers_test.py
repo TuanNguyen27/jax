@@ -25,6 +25,7 @@ from jax import jit, grad, jacfwd, jacrev
 from jax import core, tree_util
 from jax import lax
 from jax.experimental import optimizers
+from jax.experimental.lbfgs import lbfgs
 from jax.interpreters import xla
 
 from jax.config import config
@@ -297,6 +298,75 @@ class OptimizerTests(jtu.JaxTestCase):
     ans = optimizers.pack_optimizer_state(
         optimizers.unpack_optimizer_state(expected))
     self.assertEqual(ans, expected)
+
+  def testLBFGSpytrees(self):
+    def loss(x):
+      return np.sum(np.real(x * np.conj(x)))
+
+    def loss_iterable(xs):
+      return np.sum([loss(x) for x in xs])
+
+    def loss_dict(x_dict):
+      return loss(x_dict['x']) + loss(x_dict['y'])
+
+    def loss_mixed(x_tree):
+      scalar, inner_list, xy_dict = x_tree
+      return loss(scalar) + loss_iterable(inner_list) + loss_dict(xy_dict)
+
+    # with scalar arg
+    x_min, loss_min = lbfgs(loss, 3.)
+    self.assertAllClose(x_min, 0., check_dtypes=False)
+    self.assertAllClose(loss_min, 0., check_dtypes=False)
+
+    # with vector arg
+    x_min, loss_min = lbfgs(loss, np.array([3., 2., 1.]))
+    self.assertAllClose(x_min, np.zeros([3]), check_dtypes=False)
+    self.assertAllClose(loss_min, 0., check_dtypes=False)
+
+    # with nd arg
+    x_min, loss_min = lbfgs(loss, np.array([[3., 2., 1.], [2., 3., 1.]]))
+    self.assertAllClose(x_min, np.zeros([2, 3]), check_dtypes=False)
+    self.assertAllClose(loss_min, 0., check_dtypes=False)
+
+    # with tuple arg
+    x_min, loss_min = lbfgs(loss_iterable, (2., 3., 4.))
+    self.assertAllClose(x_min, (0., 0., 0.), check_dtypes=False)
+    self.assertAllClose(loss_min, 0., check_dtypes=False)
+
+    # with dict arg
+    x_min, loss_min = lbfgs(loss_dict, {'x': 1., 'y': 2.})
+    self.assertAllClose(x_min, {'x': 0., 'y': 0.}, check_dtypes=False)
+    self.assertAllClose(loss_min, 0., check_dtypes=False)
+
+    # with mixed pytree arg
+    x0 = [3., [np.array([1., 2.]), 4., np.array([[1., 2.], [3., 4.]])], {'x': 1., 'y': np.array([1., 2.])}]
+    x_expect = [0., [np.zeros([2]), 0., np.zeros([2, 2])], {'x': 0., 'y': np.zeros([2])}]
+    x_min, loss_min = lbfgs(loss_mixed, x0)
+    self.assertAllClose(x_min, x_expect, check_dtypes=False)
+    self.assertAllClose(loss_min, 0., check_dtypes=False)
+
+  def testLBFGSdtypes(self):
+    # TODO
+    #  real function with complex intermediate values
+    #  function of mixed variables
+    #  all-complex
+    #  float16 vs float32
+    pass
+
+  def testLbfgsArgs(self):
+    # TODO trivial args
+    # TODO non-trivial python type args
+    # TODO jax type args
+    # TODO use all options as documented
+    # TODO use only some options
+    # TODO use illegal option
+    pass
+
+  def testLbfgsConvergence(self):
+    # TODO list of functions from wikipedia
+    pass
+
+
 
 if __name__ == '__main__':
   absltest.main()
