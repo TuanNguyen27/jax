@@ -346,25 +346,103 @@ class OptimizerTests(jtu.JaxTestCase):
     self.assertAllClose(loss_min, 0., check_dtypes=False)
 
   def testLBFGSdtypes(self):
-    # TODO
-    #  real function with complex intermediate values
-    #  function of mixed variables
-    #  all-complex
-    #  float16 vs float32
-    pass
+    x_target = np.array([1., 2-3j, 4], dtype=np.complex64)
+
+    def loss_complex(x):
+      diff = x-x_target
+      return np.sum(np.real(diff * np.conj(diff)))
+
+    def loss_iterable(xs):
+      return np.sum([loss_complex(x) for x in xs])
+
+    # function in real vars with complex intermediate values
+    x_min, loss_min = lbfgs(loss_complex, np.zeros([3], dtype=np.float32))
+    self.assertAllClose(x_min, np.real(x_target), check_dtypes=True)
+    self.assertAllClose(loss_min, loss_complex(np.real(x_target)), check_dtypes=True)
+
+    # function in complex varfiable
+    x_min, loss_min = lbfgs(loss_complex, np.zeros([3], dtype=np.complex64))
+    self.assertAllClose(x_min, x_target, check_dtypes=True)
+    self.assertAllClose(loss_min, 0, check_dtypes=True)
+
+    # function in one real and one complex variable
+    x_min, loss_min = lbfgs(loss_iterable, [np.zeros([3], dtype=np.float32), np.zeros([3], dtype=np.complex64)])
+    self.assertAllClose(x_min, [np.real(x_target), x_target], check_dtypes=True)
+    self.assertAllClose(loss_min, loss_iterable([np.real(x_target), x_target]), check_dtypes=True)
+
+    # check preservation of dtype
+    x_min, loss_min = lbfgs(loss_complex, np.zeros([3], dtype=np.float16))
+    self.assertAllClose(x_min, np.array(np.real(x_target), dtype=np.float16), check_dtypes=True)
+    self.assertAllClose(loss_min, loss_complex(np.real(x_target)), check_dtypes=True)
 
   def testLbfgsArgs(self):
-    # TODO trivial args
-    # TODO non-trivial python type args
-    # TODO jax type args
-    # TODO use all options as documented
-    # TODO use only some options
-    # TODO use illegal option
-    pass
+    x_target = np.array([1, 2, 3])
+
+    def loss(x):
+      return np.sum(np.real((x-x_target) * np.conj((x-x_target))))
+
+    def loss_with_args(x, n):
+      return n * loss(x)
+
+    def loss_with_array_arg(x, x1):
+      return np.sum(np.real((x-x1) * np.conj((x-x1))))
+
+    # with scalar arg
+    x_min, loss_min = lbfgs(loss_with_args, np.zeros([3], dtype=np.float32), args=(3,))
+    self.assertAllClose(x_min, np.array(x_target, dtype=np.float32), check_dtypes=True)
+    self.assertAllClose(loss_min, 0., check_dtypes=True)
+
+    # with array arg
+    x_min, loss_min = lbfgs(loss_with_array_arg, np.zeros([3], dtype=np.float32), args=(x_target,))
+    self.assertAllClose(x_min, np.array(x_target, dtype=np.float32), check_dtypes=True)
+    self.assertAllClose(loss_min, 0., check_dtypes=True)
+
+    # using options
+    full_options = {'step_size': 0.5, 'max_iter': 100, 'max_eval': 'default', 'tolerance_grad': 1e-5,
+                    'tolerance_change': 1e-9, 'line_search': 'strong_wolfe', 'history_size': 50, 'wolfe_c1': 1e-4,
+                    'wolfe_c2': 0.9, 'max_iter_ls': 20}
+    partial_options = {'tolerance_change': 1e-8, 'max_iter_ls': 10}
+    illegal_options = {'tolerance_change': 1e-8, 'max_iter_ls': 10, 'num_cats': 3}
+    x_min, loss_min = lbfgs(loss, np.zeros([3], dtype=np.float32), options=full_options)
+    self.assertAllClose(x_min, np.array(x_target, dtype=np.float32), check_dtypes=True)
+    self.assertAllClose(loss_min, 0., check_dtypes=True)
+    x_min, loss_min = lbfgs(loss, np.zeros([3], dtype=np.float32), options=partial_options)
+    self.assertAllClose(x_min, np.array(x_target, dtype=np.float32), check_dtypes=True)
+    self.assertAllClose(loss_min, 0., check_dtypes=True)
+    x_min, loss_min = lbfgs(loss, np.zeros([3], dtype=np.float32), options=illegal_options)
+    self.assertAllClose(x_min, np.array(x_target, dtype=np.float32), check_dtypes=True)
+    self.assertAllClose(loss_min, 0., check_dtypes=True)
 
   def testLbfgsConvergence(self):
-    # TODO list of functions from wikipedia
-    pass
+    # test functions from https://en.wikipedia.org/wiki/Test_functions_for_optimization
+    # tuple: function, list of initial_guesses, fun: initial_guess -> minimizer, value at minimum, name (for debugging)
+    # TODO start values?
+    rastrigin = (lambda x: 10 * len(x) + np.sum(x * x - 10 * np.cos(2 * np.pi * x)),
+                 [np.ones([3])], lambda x: np.zeros_like(x), 0, 'rastrigin')
+    ackley = (lambda z: -20 * np.exp(-0.2 * np.sqrt(0.5 * np.sum(z * z))) - np.exp(0.5 * np.sum(np.cos(2*np.pi*z)))
+                        + np.e + 20,
+              [np.ones([2])], lambda x: np.zeros_like(x), 0, 'ackley')
+    sphere = (lambda x: np.sum(x ** 2), [np.ones([4])], lambda x: np.zeros_like(x), 0, 'sphere')
+    rosenbrock = (lambda x: np.sum(100.0 * (x[1:] - x[:-1] ** 2) ** 2 + (1 - x[:-1]) ** 2),
+                  [np.zeros(10)], lambda x: np.ones_like(x), 0, 'rosenbrock')
+    baele = (lambda z: (1.5 - z[0] + z[0] * z[1]) ** 2 + (2.25 - z[0] + z[0] * z[1] ** 2) ** 2 + (2.625 - z[0] + z[0] * z[1] ** 3) ** 2,
+             [np.array([0., 0.])], lambda x: np.array([3, 0.5]), 0, 'baele')
+    goldstein_price = (lambda z: (1 + (np.sum(z) + 1)**2 * (19 - 14*np.sum(z) + 3*np.sum(z**2) + 6*np.prod(z)))
+                                 * (30 + (2*z[0] - 3*z[1])**2 * (18 - 32*z[0] + 12*z[0]**2 + 48*z[1]
+                                                                 - 36*np.prod(z) + 27*z[1]**2)),
+                       [np.array([0., 0.])], lambda z: np.array([0., -1]), 3., 'goldstein-price')
+    # TODO (Jakob-Unfried) further tests from the list
+
+    functions = [rastrigin, sphere, rosenbrock, baele]
+    currently_causing_problems = [ackley, goldstein_price]  # FIXME (Jakob-Unfried) probably need to tweek options for these...
+
+    for loss, guesses, x_min_fun, loss_expected, name in functions:
+      for guess in guesses:
+        x_min, loss_min = lbfgs(loss, guess)
+        self.assertAllClose(x_min, x_min_fun(guess), check_dtypes=False, atol=2e-05)
+        self.assertAllClose(loss_min, loss_expected, check_dtypes=False)
+
+
 
 
 
