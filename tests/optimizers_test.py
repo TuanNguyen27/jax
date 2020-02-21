@@ -427,13 +427,39 @@ class OptimizerTests(jtu.JaxTestCase):
                   [np.zeros(10)], lambda x: np.ones_like(x), 0, 'rosenbrock')
     baele = (lambda z: (1.5 - z[0] + z[0] * z[1]) ** 2 + (2.25 - z[0] + z[0] * z[1] ** 2) ** 2 + (2.625 - z[0] + z[0] * z[1] ** 3) ** 2,
              [np.array([0., 0.])], lambda x: np.array([3, 0.5]), 0, 'baele')
-    goldstein_price = (lambda z: (1 + (np.sum(z) + 1)**2 * (19 - 14*np.sum(z) + 3*np.sum(z**2) + 6*np.prod(z)))
-                                 * (30 + (2*z[0] - 3*z[1])**2 * (18 - 32*z[0] + 12*z[0]**2 + 48*z[1]
-                                                                 - 36*np.prod(z) + 27*z[1]**2)),
+    goldstein_price = (lambda z: (1 + (np.sum(z) + 1)**2 * (19 - 14*np.sum(z) + 3*np.sum(z)**2))
+                                 * (30 + (2*z[0] - 3*z[1])**2 * (18 - 32*z[0] + 48*z[1] + (2*z[0] - 3*z[1])**2)),
                        [np.array([0., 0.])], lambda z: np.array([0., -1]), 3., 'goldstein-price')
+
+    booth = (lambda z: (z[0] + 2*z[1]-7)**2 + (2*z[0] + z[1] - 5)**2,
+            [np.array([0., 0.])], lambda z: np.array([1, 3]), 0., 'booth')
+
+    bukin = (lambda z: 100 * np.sqrt(np.abs(z[1] - 0.01 * z[0]**2)) + 0.01 * np.abs(z[0] + 10),
+            [np.array([0., 0.])], lambda z: np.array([-10, 1]), 0., 'bukin')
+
+    matyas = (lambda z: 0.26*np.sum(z**2) - 0.48*z[0]*z[1],
+            [np.array([0., 0.])], lambda z: np.array([0., 0.]), 0., 'matyas')
+
+    levi = (lambda z: np.sin(3*np.pi*z[0])**2 + (z[0]-1)**2 * (1 + np.sin(3*np.pi*z[1])**2) + (z[1]-1)**2 * (1+ np.sin(2*np.pi*z[1])**2),
+            [np.array([0., 0.])], lambda z: np.array([1, 1]), 0., 'levi')
+
+    three_hump = (lambda z: 2 * z[0] ** 2 - 1.05 * z[0] ** 4 + z[0] ** 6 / 6 + np.prod(z) + z[1] ** 2,
+            [np.array([0., 0.])], lambda z: np.array([0., 0.]), 0., 'three_hump')
+
+    easom = (lambda z: - np.cos(z[0]) * np.cos(z[1]) * np.exp(-np.sum((z-np.pi)**2)),
+                [np.array([0., 0.])], lambda z: np.array([np.pi, np.pi]), -1, 'easom')
+
+    mccormick = (lambda z: np.sin(np.sum(z)) + (z[0]-z[1])**2 - 1.5*z[0] + 2.5*z[1] + 1,
+                [np.array([0., 0.])], lambda z: np.array([-0.54719, -1.54719]), -1.9133, 'mccormick')
+
+    schaffer = (lambda z: 0.5 + (np.sin(z[0]**2 - z[1]**2)**2 - 0.5) / (1 + 0.001 * np.sum(z**2)) ** 2,
+                [np.array([0., 0.])], lambda z: np.array([0., 0.]), 0., 'schaffer')
+
+    # styblinski_tang = (lambda z: np.sum(z**4 - 16*z**2 + 5*z)/2,
+    #               [np.zeros(10)], lambda x: onp.repeat(-2.903534, 10), 0, 'rosenbrock')
     # TODO (Jakob-Unfried) further tests from the list
 
-    functions = [rastrigin, sphere, rosenbrock, baele]
+    functions = [rastrigin, sphere, rosenbrock, baele, booth, bukin, matyas, levi, three_hump, easom, mccormick, schaffer]
     currently_causing_problems = [ackley, goldstein_price]  # FIXME (Jakob-Unfried) probably need to tweek options for these...
 
     for loss, guesses, x_min_fun, loss_expected, name in functions:
